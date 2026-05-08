@@ -700,3 +700,56 @@ func TestEC2_DeleteTags(t *testing.T) {
 	}
 	golden.New(t, golden.WithIgnoreFields("ResourceId", "ResultMetadata")).Assert(t.Name()+"_after_delete", descResult)
 }
+
+func TestEC2_CreateVpc_WithTagSpecifications(t *testing.T) {
+	client := newEC2Client(t)
+	ctx := t.Context()
+
+	createResult, err := client.CreateVpc(ctx, &ec2.CreateVpcInput{
+		CidrBlock: aws.String("10.55.0.0/16"),
+		TagSpecifications: []types.TagSpecification{
+			{
+				ResourceType: types.ResourceTypeVpc,
+				Tags: []types.Tag{
+					{Key: aws.String("Name"), Value: aws.String("tagspec-vpc")},
+					{Key: aws.String("Env"), Value: aws.String("test")},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateVpc with TagSpecifications failed: %v", err)
+	}
+
+	vpcID := *createResult.Vpc.VpcId
+
+	t.Cleanup(func() {
+		_, _ = client.DeleteVpc(context.Background(), &ec2.DeleteVpcInput{
+			VpcId: aws.String(vpcID),
+		})
+	})
+
+	if got := len(createResult.Vpc.Tags); got != 2 {
+		t.Errorf("create response Tags = %d entries, want 2", got)
+	}
+
+	descResult, err := client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{
+		VpcIds: []string{vpcID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden.New(t, golden.WithIgnoreFields("VpcId", "OwnerId", "ResultMetadata")).Assert(t.Name()+"_describe", descResult)
+
+	tagsResult, err := client.DescribeTags(ctx, &ec2.DescribeTagsInput{
+		Filters: []types.Filter{
+			{Name: aws.String("resource-id"), Values: []string{vpcID}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(tagsResult.Tags); got != 2 {
+		t.Errorf("DescribeTags = %d entries, want 2", got)
+	}
+}
