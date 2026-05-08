@@ -213,6 +213,8 @@ func (s *Service) CreateSecurityGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, sg.GroupID, "security-group")
+
 	writeEC2XMLResponse(w, XMLCreateSecurityGroupResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
@@ -423,11 +425,33 @@ func (s *Service) CreateVpc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, vpc.VpcID, "vpc")
+
 	writeEC2XMLResponse(w, XMLCreateVpcResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
 		Vpc:       convertToXMLVpc(vpc),
 	})
+}
+
+// applyTagsOnCreate copies TagSpecifications from the form (if any) onto the
+// just-created resource via the storage tag API. Storage.CreateTags upserts in
+// place, and the existing Storage.Create* methods return the storage-owned
+// pointer, so the caller's resource value reflects the new tags by the time
+// this returns — no further mutation needed. resourceType matches the AWS
+// TagSpecifications.ResourceType values: "vpc", "subnet", "internet-gateway",
+// "route-table", "security-group".
+func applyTagsOnCreate(r *http.Request, storage Storage, resourceID, resourceType string) {
+	if err := r.ParseForm(); err != nil {
+		return
+	}
+
+	tags := parseTagSpecificationsForResourceType(r.Form, resourceType)
+	if len(tags) == 0 {
+		return
+	}
+
+	_ = storage.CreateTags(r.Context(), []string{resourceID}, tags)
 }
 
 // DeleteVpc handles the DeleteVpc action.
@@ -514,6 +538,8 @@ func (s *Service) CreateSubnet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	applyTagsOnCreate(r, s.storage, subnet.SubnetID, "subnet")
+
 	writeEC2XMLResponse(w, XMLCreateSubnetResponse{
 		Xmlns:     ec2XMLNS,
 		RequestID: uuid.New().String(),
@@ -592,6 +618,8 @@ func (s *Service) CreateInternetGateway(w http.ResponseWriter, r *http.Request) 
 
 		return
 	}
+
+	applyTagsOnCreate(r, s.storage, igw.InternetGatewayID, "internet-gateway")
 
 	writeEC2XMLResponse(w, XMLCreateInternetGatewayResponse{
 		Xmlns:           ec2XMLNS,
@@ -683,6 +711,8 @@ func (s *Service) CreateRouteTable(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	applyTagsOnCreate(r, s.storage, rt.RouteTableID, "route-table")
 
 	writeEC2XMLResponse(w, XMLCreateRouteTableResponse{
 		Xmlns:      ec2XMLNS,
@@ -1088,6 +1118,94 @@ func parseFiltersFromForm(form map[string][]string) map[string][]string {
 	}
 
 	return out
+}
+
+// tagSpec accumulates one TagSpecification.N entry being parsed from form data.
+type tagSpec struct {
+	resourceType string
+	tags         []Tag
+}
+
+// parseTagSpecificationsForResourceType reads TagSpecifications.N.ResourceType
+// and TagSpecifications.N.Tag.M.{Key,Value} from form data, returning the
+// tags whose ResourceType matches `resourceType` (e.g. "vpc", "subnet").
+// The Query form-to-JSON converter does not understand this nested pattern,
+// so callers parse from r.Form directly.
+func parseTagSpecificationsForResourceType(form map[string][]string, resourceType string) []Tag {
+	specs := make(map[int]*tagSpec)
+
+	for key, values := range form {
+		applyTagSpecFormEntry(specs, key, values)
+	}
+
+	for _, sp := range specs {
+		if sp.resourceType == resourceType {
+			return sp.tags
+		}
+	}
+
+	return nil
+}
+
+func applyTagSpecFormEntry(specs map[int]*tagSpec, key string, values []string) {
+	suffix, ok := strings.CutPrefix(key, "TagSpecification.")
+	if !ok || len(values) == 0 {
+		return
+	}
+
+	dot := strings.Index(suffix, ".")
+	if dot < 0 {
+		return
+	}
+
+	n, err := strconv.Atoi(suffix[:dot])
+	if err != nil {
+		return
+	}
+
+	entry, exists := specs[n]
+	if !exists {
+		entry = &tagSpec{}
+		specs[n] = entry
+	}
+
+	setTagSpecField(entry, suffix[dot+1:], values[0])
+}
+
+func setTagSpecField(entry *tagSpec, field, value string) {
+	switch {
+	case field == "ResourceType":
+		entry.resourceType = value
+	case strings.HasPrefix(field, "Tag."):
+		applyTagFromTagSpec(entry, strings.TrimPrefix(field, "Tag."), value)
+	}
+}
+
+func applyTagFromTagSpec(entry *tagSpec, suffix, value string) {
+	tdot := strings.Index(suffix, ".")
+	if tdot < 0 {
+		return
+	}
+
+	m, err := strconv.Atoi(suffix[:tdot])
+	if err != nil {
+		return
+	}
+
+	ensureTag(&entry.tags, m)
+
+	switch suffix[tdot+1:] {
+	case "Key":
+		entry.tags[m-1].Key = value
+	case "Value":
+		entry.tags[m-1].Value = value
+	}
+}
+
+func ensureTag(tags *[]Tag, n int) {
+	for len(*tags) < n {
+		*tags = append(*tags, Tag{})
+	}
 }
 
 // DispatchAction routes the request to the appropriate handler based on Action parameter.
