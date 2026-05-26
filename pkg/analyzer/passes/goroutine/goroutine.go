@@ -34,6 +34,12 @@ func run(pass *analysis.Pass) (interface{}, error) {
 		if funcDecl.Name.Name == "init" {
 			checkForGoStmtsInFunc(pass, funcDecl)
 		}
+
+		// Also flag goroutines launched in TestMain, which can similarly
+		// cause subtle leaks that persist across the entire test binary run.
+		if funcDecl.Name.Name == "TestMain" {
+			checkForGoStmtsInFunc(pass, funcDecl)
+		}
 	})
 
 	return nil, nil
@@ -49,11 +55,11 @@ func checkForGoStmtsInFunc(pass *analysis.Pass, funcDecl *ast.FuncDecl) {
 		if !ok {
 			return true
 		}
-		reportGoStmtInInit(pass, goStmt.Pos())
+		reportGoStmtInFunc(pass, goStmt.Pos(), funcDecl.Name.Name)
 		return true
 	})
 }
 
-func reportGoStmtInInit(pass *analysis.Pass, pos token.Pos) {
-	pass.Reportf(pos, "goroutine launched inside init function; this can cause hard-to-detect leaks or race conditions")
+func reportGoStmtInFunc(pass *analysis.Pass, pos token.Pos, funcName string) {
+	pass.Reportf(pos, "goroutine launched inside %s function; this can cause hard-to-detect leaks or race conditions", funcName)
 }
